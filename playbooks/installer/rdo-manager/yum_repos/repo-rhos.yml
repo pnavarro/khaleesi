@@ -5,97 +5,51 @@
   hosts: "{{ repo_host }}:&RedHat"
   vars:
     - ansible_ssh_user: root
+    - repos:
+        7-director:
+          - rhel-7-server-rpms
+          - rhel-7-server-extras-rpms
+          - rhel-7-server-openstack-7.0-rpms
+          - rhel-7-server-openstack-7.0-director-rpms
+          - rhel-7-server-rh-common-rpms
+        8-director:
+          - rhel-7-server-rpms
+          - rhel-7-server-extras-rpms
+          - rhel-7-server-openstack-8-rpms
+          - rhel-7-server-openstack-8-director-rpms
+          - rhel-7-server-rh-common-rpms
+
   environment:
       http_proxy: "{{ installer.http_proxy_url }}"
   gather_facts: yes
   tasks:
-      - name: set proxy server for yum configuration
-        sudo: yes
-        lineinfile: dest=/etc/yum.conf line="proxy={{ installer.http_proxy_url }}"
-        when: installer.proxy not in ['none']
+      - name: Register system with RHN
+      redhat_subscription: state=present
+                           username= !lookup private.distro.rhel.subscription.username
+                           password= !lookup private.distro.rhel.subscription.password
+                           pool= !lookup private.distro.rhel.subscription.pool
+                           autosubscribe=true
 
-      - name: rpm macro for proxy
-        sudo: yes
-        template: src=../templates/rpm.macros.proxy.j2 dest=/etc/rpm/macros.proxy
-        when: installer.proxy not in ['none']
+      - name: Disable all repos
+        command: subscription-manager repos --disable=* creates=/tmp/.repos-disabled-enabled
+        register: disable_repo_result
 
-      - name: Install release tool on machine
-        command: "rpm -i {{ product.rpm }}"
-        when: installer.proxy not in ['none']
+      - set_fact:
+          repos_to_enable: "{{ repos[product.full_version]}}"
 
-      - name: Install release tool on machine
-        command: "yum localinstall -y {{ product.rpm }}"
-        when: installer.proxy in ['none']
+      - set_fact:
+          rhsm_enable_repos: |
+                  {% for item in repos_to_enable %}
+                    --enable={{ item }}
+                  {%- endfor %}
 
-      #this will uncouple the virthost version from the undercloud and overcloud rhel versions
-      - name: create directory for DIB yum repo configurations
-        file: path={{installer.dib_dir}} state=directory mode=0755
+      - name: Enable required repos
+        command: subscription-manager repos {{ rhsm_enable_repos }} creates=/tmp/.repos-disabled-enabled
+        register: enable_repo_result
 
-      - name: Execute rhos-release for pinned osp-director puddle (osp)
-        sudo: yes
-        shell: >
-          rhos-release -p {{ product.repo.puddle_director_pin_version }} {{ product.full_version }};
-          rhos-release -r {{ distro.full_version }} -t {{installer.dib_dir}} -p {{ product.repo.puddle_director_pin_version }} {{ product.full_version }};
-        register: pinned_puddle
-        when: product.repo_type in ['puddle'] and product.repo.puddle_director_pin_version not in ['latest']
-
-      - name: Execute rhos-release for latest osp-director puddle (osp)
-        sudo: yes
-        shell: >
-          rhos-release -P {{ product.full_version }};
-          rhos-release -r {{ distro.full_version }} -t {{installer.dib_dir}} -P {{ product.full_version }};
-        register: pinned_puddle
-        when: product.repo_type in ['puddle'] and product.repo.puddle_director_pin_version == 'latest'
-
-      - name: Execute rhos-release for core rhos puddle (osp)
-        sudo: yes
-        shell: >
-          rhos-release -p {{ product.repo.puddle_pin_version }} {{ product.repo.core_product_version }};
-          rhos-release -r {{ distro.full_version }} -t {{installer.dib_dir}} -p {{ product.repo.puddle_pin_version }} {{ product.repo.core_product_version }};
-        register: pinned_puddle
-        when: product.repo_type == 'puddle' and product.repo.puddle_pin_version not in  ['latest']
-
-      - name: Execute rhos-release for core rhos puddle (osp)
-        sudo: yes
-        shell: >
-          rhos-release -P {{ product.repo.core_product_version }};
-          rhos-release -r {{ distro.full_version }} -t {{installer.dib_dir}} -P {{ product.repo.core_product_version }};
-        register: pinned_puddle
-        when: product.repo_type in ['puddle'] and product.repo.puddle_pin_version == 'latest'
-
-      - name: Execute rhos-release for pinned osp-director poodle (osp)
-        sudo: yes
-        shell: >
-          rhos-release  -d -p {{ product.repo.poodle_pin_version }} {{ product.full_version }};
-          rhos-release -r {{ distro.full_version }} -t {{installer.dib_dir}} -d -p {{ product.repo.poodle_pin_version }} {{ product.full_version }};
-        register: pinned_poodle
-        when: product.repo_type in ['poodle'] and product.repo.poodle_pin_version not in ['latest']
-
-      - name: Execute rhos-release for latest osp-director poodle (osp)
-        sudo: yes
-        shell: >
-          rhos-release -d -P {{ product.full_version }};
-          rhos-release -r {{ distro.full_version }} -t {{installer.dib_dir}} -d -P {{ product.full_version }};
-        register: pinned_poodle
-        when: product.repo_type in ['poodle']  and product.repo.poodle_pin_version == 'latest'
-
-      - name: Execute rhos-release for core rhos poodle (osp)
-        sudo: yes
-        shell: >
-          rhos-release -d -P {{ product.repo.core_product_version }};
-          rhos-release -d -r {{ distro.full_version }} -t {{installer.dib_dir}} -P {{ product.repo.core_product_version }};
-        register: pinned_poodle
-        when: product.repo_type in ['poodle'] and product.repo.poodle_pin_version == 'latest'
-
-      - name: yum clean all
-        command: yum clean all
-
-# - name: Get build details
-#   hosts: "{{ repo_host }}:&RedHat"
-#   vars:
-#     - ansible_ssh_user: root
-#   roles:
-#     - build_mark/build
+      - name: Create a semaphore for repos disable/enable
+        file: dest=/tmp/.repos-disabled-enabled owner=stack group=stack state=touch
+        when: disable_repo_result.rc == 0 and enable_repo_result.rc == 0
 
 - name: Linux common prep (Collect performance data, etc.)
   hosts: "{{ repo_host }}"
